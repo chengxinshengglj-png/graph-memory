@@ -25,6 +25,13 @@ import { messageRetentionPolicyRevision, normalizeMessageRetentionPolicy, runMes
 export const name = "graph-memory-dsh";
 export const inject = ["tools", "llm", "systemPrompt", "agentLoop", "agents", "sessions", "credentials", "tokenMeter"];
 const HOST = "dsh";
+/**
+ * Retrieval pool multiplier applied before the visibility filter. Five slots
+ * per rendered slot is enough to backfill a block that a same-session answer
+ * would otherwise empty, while costing nothing measurable: the vector path is
+ * already a full scan and the lexical path is a single indexed LIKE.
+ */
+const RECALL_OVER_FETCH = 5;
 function sessionKey(id) {
     return `${HOST}:${String(id)}`;
 }
@@ -546,7 +553,13 @@ export function apply(ctx, input = {}) {
             // is still in flight. Historical recall must wait for that shared probe;
             // otherwise the very first cross-session question can miss all vectors.
             await embeddingReady;
-            const recalled = await recaller.recall(query);
+            // Retrieval runs on a wider pool than the rendered width. The filters
+            // below drop memory already visible verbatim in this session's fresh
+            // window, and a pool sized exactly to the render width could be emptied
+            // entirely by that filter — a short follow-up whose top hits all came
+            // from the live session then injected nothing at all. Over-fetching lets
+            // the block backfill from cross-session or archived evidence instead.
+            const recalled = await recaller.recall(query, { overFetch: RECALL_OVER_FETCH });
             signal?.throwIfAborted?.();
             const key = String(id);
             const currentSession = sessionKey(id);
@@ -562,8 +575,8 @@ export function apply(ctx, input = {}) {
                     && isDshMemorySource(event?.data?.source)
                     && event?.surfaceOp?.op === "replace";
             });
-            const recalledNodes = filterDshRecallNodes(recalled.nodes, getNodeSources(db, recalled.nodes.map(node => node.id)), currentSession, visibleMessageIds, hasArchivedHistory);
-            const recalledMemories = filterDshRecallMemories(recalled.turnMemories, currentSession, visibleMessageIds);
+            const recalledNodes = filterDshRecallNodes(recalled.nodes, getNodeSources(db, recalled.nodes.map(node => node.id)), currentSession, visibleMessageIds, hasArchivedHistory).slice(0, config.recallMaxNodes);
+            const recalledMemories = filterDshRecallMemories(recalled.turnMemories, currentSession, visibleMessageIds).slice(0, config.recallMaxNodes);
             if (!recalledNodes.length && !recalledMemories.length)
                 return decision;
             const recalledIds = new Set(recalledNodes.map(node => node.id));

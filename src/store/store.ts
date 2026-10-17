@@ -1116,23 +1116,77 @@ export function hasTurnMemories(db: DatabaseSyncInstance): boolean {
 }
 
 /** Lexical fallback for hosts without a working embedding provider. */
+/**
+ * Question shells and particles that carry no retrieval signal. Stripping them
+ * is what lets a natural-language Chinese question reach the stored summary at
+ * all: "之前修好的发布端口是多少？" never appears verbatim in any summary, but
+ * "发布端口" does.
+ */
+const LEXICAL_TAIL = /(?:好了吗|好了|是什么呢|是多少呢|是多少|是什么|怎么样|为什么|怎么|如何|吗|呢|吧|啊|呀|么|了)+[\s?？!！。.,，]*$/u;
+const LEXICAL_STOPWORDS = new Set([
+  "什么", "怎么", "如何", "为什么", "是不是", "可以", "需要", "这个", "那个",
+  "现在", "然后", "以及", "但是", "因为", "所以", "如果", "就是", "我们",
+  "你们", "他们", "一下", "看看", "帮我", "请问", "有没有", "多少", "继续",
+  "the", "and", "for", "with", "what", "how", "why", "is", "are", "was",
+]);
+
+/**
+ * Turn a query into substring probes. Whole-phrase matching was precise but
+ * blind to any question phrased as a sentence; OR-ing every token would swing
+ * to the opposite failure and pull unrelated turns in. The middle ground is a
+ * bounded term list plus a majority-hit requirement, so a match still has to
+ * share most of the query's substance rather than one incidental word.
+ */
+function lexicalTerms(query: string): string[] {
+  const seen = new Set<string>();
+  const terms: string[] = [];
+  for (const part of query.split(/[\s,，。.、;；:：!！?？()（）\[\]【】"'“”‘’\/\\|]+/u)) {
+    const raw = part.trim();
+    if (!raw) continue;
+    let term = raw.replace(LEXICAL_TAIL, "").trim();
+    if (term.length < 2) term = raw;
+    if (term.length < 2) continue;
+    const key = term.toLowerCase();
+    if (seen.has(key) || LEXICAL_STOPWORDS.has(key)) continue;
+    seen.add(key);
+    terms.push(term);
+    if (terms.length >= 6) break;
+  }
+  return terms;
+}
+
 export function searchTurnMemories(
   db: DatabaseSyncInstance,
   query: string,
   limit: number,
 ): GmTurnMemory[] {
-  const phrase = query.trim().replace(/\s+/g, " ");
-  if (!phrase) return [];
-  // Semantic search handles paraphrases. The lexical fallback deliberately
-  // requires the complete phrase; OR-ing common words such as "is"/"the"
-  // turns a fallback into another source of unrelated prompt injection.
+  const terms = lexicalTerms(query);
+  if (!terms.length) return [];
+  // Semantic search handles paraphrases. The lexical arm only has to survive
+  // the case where the embedding provider is down or the question is a
+  // near-verbatim echo of something already stored. A single shared word is not
+  // evidence: "发布端口，配置文件" matched five summaries that only said
+  // "配置文件". Multi-term queries therefore require most of their terms, and
+  // a two-term query requires both.
+  const minHits = terms.length === 1
+    ? 1
+    : Math.max(2, Math.ceil(terms.length * 0.6));
+  const hitExpr = terms.map(() => "(CASE WHEN summary LIKE ? THEN 1 ELSE 0 END)").join(" + ");
+  const matchExpr = terms.map(() => "summary LIKE ?").join(" OR ");
+  const params = [
+    ...terms.map(term => `%${term}%`),
+    ...terms.map(term => `%${term}%`),
+    limit,
+  ];
   const rows = db.prepare(`
-    SELECT * FROM gm_turn_memories
-    WHERE summary LIKE ?
-    ORDER BY updated_at DESC
+    SELECT *, ${hitExpr} AS lexical_hits FROM gm_turn_memories
+    WHERE ${matchExpr}
+    ORDER BY lexical_hits DESC, updated_at DESC
     LIMIT ?
-  `).all(`%${phrase}%`, limit) as any[];
-  return rows.map(row => toTurnMemory(db, row));
+  `).all(...params) as any[];
+  return rows
+    .filter(row => Number(row.lexical_hits) >= minHits)
+    .map(row => toTurnMemory(db, row));
 }
 
 export function saveTurnVector(

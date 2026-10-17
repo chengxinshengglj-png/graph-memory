@@ -12,6 +12,23 @@
 import { createHash } from "crypto";
 import { searchNodes, vectorSearchWithScore, graphWalk, saveVector, getVectorHash, searchTurnMemories, turnMemoryVectorSearchWithScore, nodesForTurnMemories, saveTurnVector, getTurnVectorHash, getNavigationTriplesForMemories, findNavigationSeedTermIds, navigationCandidateTermIds, rankTurnMemoryIdsByNavigation, getTurnMemoriesByIds, hasTurnMemories, } from "../store/store.js";
 import { personalizedNavigationPageRank } from "../graph/pagerank.js";
+/**
+ * Recency is a tie-breaker, not a relevance signal. A memory that is slightly
+ * less similar but four months older should not outrank the one that describes
+ * what the user is doing this week, yet it must not jump ahead of a clearly
+ * better match either. A 30-day half life with a 0.15 ceiling sits below one
+ * reciprocal-rank step (1/1 - 1/2 = 0.5), so it can reorder near-ties without
+ * overriding the similarity ranks that the embedding provider produced.
+ */
+const RECENCY_HALF_LIFE_MS = 30 * 24 * 60 * 60 * 1000;
+const RECENCY_WEIGHT = 0.15;
+/** 1 for a memory written now, 0.5 at thirty days, 0.25 at sixty. */
+function recencyOf(memory, now) {
+    const updatedAt = Number(memory.updatedAt);
+    if (!Number.isFinite(updatedAt) || updatedAt <= 0)
+        return 0;
+    return Math.pow(0.5, Math.max(0, now - updatedAt) / RECENCY_HALF_LIFE_MS);
+}
 export class Recaller {
     db;
     cfg;
@@ -25,8 +42,19 @@ export class Recaller {
         this.embed = fn;
         this.embeddingFingerprint = fingerprint;
     }
-    async recall(query) {
+    /**
+     * @param options.overFetch Retrieval pool multiplier. Defaults to 1, which
+     * keeps the historical behaviour: `recallMaxNodes` bounds both retrieval and
+     * what the caller may render. A host that post-filters results (for example
+     * to drop memories already visible in its fresh window) passes a multiplier
+     * so that filtering cannot empty the whole block: a three-slot pool where all
+     * three hits belong to the current session used to yield nothing at all, and
+     * the caller then injected no memory for that turn.
+     */
+    async recall(query, options = {}) {
         const limit = this.cfg.recallMaxNodes;
+        const overFetch = Math.max(1, Math.floor(options.overFetch ?? 1));
+        const poolLimit = limit * overFetch;
         let queryVector;
         if (this.embed) {
             try {
@@ -37,7 +65,7 @@ export class Recaller {
                 // temporarily unavailable.
             }
         }
-        const directMemories = this.recallTurnMemories(query, limit, queryVector);
+        const directMemories = this.recallTurnMemories(query, poolLimit, queryVector);
         const seedIds = findNavigationSeedTermIds(this.db, query, directMemories.map(memory => memory.id));
         let graphMemories = [];
         let navigationScores = new Map();
@@ -46,10 +74,10 @@ export class Recaller {
             navigationScores = personalizedNavigationPageRank(this.db, seedIds, candidateTermIds, this.cfg).scores;
             graphMemories = getTurnMemoriesByIds(this.db, rankTurnMemoryIdsByNavigation(this.db, navigationScores));
         }
-        const turnMemories = this.mergeTurnMemoryRanks(directMemories, graphMemories, limit);
+        const turnMemories = this.mergeTurnMemoryRanks(directMemories, graphMemories, poolLimit);
         if (turnMemories.length) {
             const memoryIds = turnMemories.map(memory => memory.id);
-            const nodes = nodesForTurnMemories(this.db, memoryIds, limit);
+            const nodes = nodesForTurnMemories(this.db, memoryIds, poolLimit);
             const { edges } = graphWalk(this.db, nodes.map(node => node.id), 0);
             return {
                 nodes,
@@ -60,7 +88,7 @@ export class Recaller {
         }
         // Databases created before the turn-memory migration remain searchable.
         // The same confidence rule applies; a legacy node match cannot bypass it.
-        return this.recallPrecise(query, limit, queryVector, hasTurnMemories(this.db));
+        return this.recallPrecise(query, poolLimit, queryVector, hasTurnMemories(this.db));
     }
     /**
      * Fuse independent summary and graph ranks without mixing incomparable
@@ -90,6 +118,10 @@ export class Recaller {
             }
         });
         return Array.from(candidates.values())
+            .map(candidate => ({
+            ...candidate,
+            score: candidate.score + RECENCY_WEIGHT * recencyOf(candidate.memory, Date.now()),
+        }))
             .sort((left, right) => right.score - left.score
             || left.directRank - right.directRank
             || right.memory.updatedAt - left.memory.updatedAt
