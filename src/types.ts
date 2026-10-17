@@ -172,6 +172,13 @@ export interface GmConfig {
    * a "nearest" memory even when no memory is actually relevant.
    */
   semanticScoreThreshold?: number;
+  /**
+   * How many candidates the optional cross-encoder reranker scores. Only the
+   * head is worth scoring: it separates candidates the bi-encoder ranked nearly
+   * equally, while cost grows linearly per document. Ignored when no reranker
+   * is configured.
+   */
+  rerankTopN?: number;
   /** Number of recent user turns kept as native question/final-answer endpoints on the host context surface. */
   freshTurnCount: number;
   embedding?: EmbeddingConfig;

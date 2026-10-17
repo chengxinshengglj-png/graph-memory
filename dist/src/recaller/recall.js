@@ -33,6 +33,7 @@ export class Recaller {
     db;
     cfg;
     embed = null;
+    rerank = null;
     embeddingFingerprint = "";
     constructor(db, cfg) {
         this.db = db;
@@ -41,6 +42,13 @@ export class Recaller {
     setEmbedFn(fn, fingerprint = "") {
         this.embed = fn;
         this.embeddingFingerprint = fingerprint;
+    }
+    /**
+     * Optional cross-encoder pass over the candidate head. Absent by default: a
+     * host that does not configure a reranker keeps the embedding order exactly.
+     */
+    setRerankFn(fn) {
+        this.rerank = fn;
     }
     /**
      * @param options.overFetch Retrieval pool multiplier. Defaults to 1, which
@@ -74,7 +82,8 @@ export class Recaller {
             navigationScores = personalizedNavigationPageRank(this.db, seedIds, candidateTermIds, this.cfg).scores;
             graphMemories = getTurnMemoriesByIds(this.db, rankTurnMemoryIdsByNavigation(this.db, navigationScores));
         }
-        const turnMemories = this.mergeTurnMemoryRanks(directMemories, graphMemories, poolLimit);
+        let turnMemories = this.mergeTurnMemoryRanks(directMemories, graphMemories, poolLimit);
+        turnMemories = await this.rerankMemories(query, turnMemories);
         if (turnMemories.length) {
             const memoryIds = turnMemories.map(memory => memory.id);
             const nodes = nodesForTurnMemories(this.db, memoryIds, poolLimit);
@@ -128,6 +137,37 @@ export class Recaller {
             || left.memory.id.localeCompare(right.memory.id))
             .slice(0, limit)
             .map(candidate => candidate.memory);
+    }
+    /**
+     * Cross-encoder pass over the head of the candidate list.
+     *
+     * Only the head is scored, not the whole pool: the point is to separate the
+     * few candidates a bi-encoder ranked almost equally, and cross-encoder cost
+     * grows linearly per document. The untouched tail keeps its embedding order,
+     * so a reranker that disagrees still cannot erase a candidate.
+     *
+     * Any failure — no reranker configured, timeout, malformed response — returns
+     * the input order unchanged.
+     */
+    async rerankMemories(query, memories) {
+        if (!this.rerank || memories.length < 2)
+            return memories;
+        const headSize = Math.max(1, Math.min(memories.length, this.cfg.rerankTopN ?? 6));
+        const head = memories.slice(0, headSize);
+        const tail = memories.slice(headSize);
+        try {
+            const scores = await this.rerank(query, head.map(memory => `${memory.outcome}: ${memory.summary}`));
+            if (!scores || scores.length !== head.length)
+                return memories;
+            const ordered = head
+                .map((memory, index) => ({ memory, score: scores[index] }))
+                .sort((left, right) => right.score - left.score)
+                .map(entry => entry.memory);
+            return [...ordered, ...tail];
+        }
+        catch {
+            return memories;
+        }
     }
     recallTurnMemories(query, limit, queryVector) {
         const lexical = searchTurnMemories(this.db, query, limit);

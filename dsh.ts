@@ -43,6 +43,7 @@ import {
   GRAPH_EXTRACTION_TOOL_NAME,
 } from "./src/extractor/contract.ts";
 import { Recaller } from "./src/recaller/recall.ts";
+import { createHttpReranker } from "./src/recaller/rerank.ts";
 import { assembleContext } from "./src/format/assemble.ts";
 import {
   replaceDshArchivedPrefix,
@@ -89,6 +90,17 @@ export interface Config {
   recallMaxNodes?: number;
   /** Optional embedding-provider-calibrated cosine floor for every recall path. */
   semanticScoreThreshold?: number;
+  /**
+   * Optional cross-encoder reranker. Off unless `rerankEndpoint` is set: an
+   * extra HTTP hop per turn must be an explicit choice, and a reranker outage
+   * may only cost the rerank, never the recall.
+   */
+  rerankEndpoint?: string;
+  rerankModel?: string;
+  /** Hard ceiling for the rerank request. Defaults to 1500 ms. */
+  rerankTimeoutMs?: number;
+  /** How many candidates to score, counted from the head. Defaults to 6. */
+  rerankTopN?: number;
   maintenanceInterval?: number;
   /** Durable raw-message retention. Defaults to keep=all (no deletion). */
   messageRetention?: MessageRetentionConfig;
@@ -246,12 +258,20 @@ export function apply(ctx: DshContext, input: Config = {}): void {
     compactTurnCount: maintenanceInterval,
     recallMaxNodes,
     semanticScoreThreshold: input.semanticScoreThreshold ?? DEFAULT_CONFIG.semanticScoreThreshold,
+    rerankTopN: input.rerankTopN ?? 6,
     embedding,
   };
   const extractionEnabled = input.extractionEnabled ?? true;
   const recallEnabled = input.recallEnabled ?? true;
   const db = openDb(config.dbPath, { busyTimeoutMs: input.dbBusyTimeoutMs });
   const recaller = new Recaller(db, config);
+  if (input.rerankEndpoint) {
+    recaller.setRerankFn(createHttpReranker({
+      endpoint: input.rerankEndpoint,
+      model: input.rerankModel,
+      timeoutMs: input.rerankTimeoutMs ?? 1500,
+    }));
+  }
   const latestRoute = new Map<string, Route>();
   const extractChain = new Map<string, Promise<void>>();
   const turnCounts = new Map<string, number>();

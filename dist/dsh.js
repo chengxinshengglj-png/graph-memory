@@ -13,6 +13,7 @@ import { allActiveNodes, getRecentTurnMemoriesBySession, getStats, getVectorStat
 import { Extractor } from "./src/extractor/extract.js";
 import { GRAPH_EXTRACTION_TOOL, GRAPH_EXTRACTION_TOOL_NAME, } from "./src/extractor/contract.js";
 import { Recaller } from "./src/recaller/recall.js";
+import { createHttpReranker } from "./src/recaller/rerank.js";
 import { assembleContext } from "./src/format/assemble.js";
 import { replaceDshArchivedPrefix, selectDshRollingCompactionRange, } from "./src/format/dsh-compaction.js";
 import { replaceDshCompletedTurnTrace, projectDshCompletedTurnMemory, selectDshCompletedTurnTraceRange, } from "./src/format/dsh-turn-projection.js";
@@ -118,12 +119,20 @@ export function apply(ctx, input = {}) {
         compactTurnCount: maintenanceInterval,
         recallMaxNodes,
         semanticScoreThreshold: input.semanticScoreThreshold ?? DEFAULT_CONFIG.semanticScoreThreshold,
+        rerankTopN: input.rerankTopN ?? 6,
         embedding,
     };
     const extractionEnabled = input.extractionEnabled ?? true;
     const recallEnabled = input.recallEnabled ?? true;
     const db = openDb(config.dbPath, { busyTimeoutMs: input.dbBusyTimeoutMs });
     const recaller = new Recaller(db, config);
+    if (input.rerankEndpoint) {
+        recaller.setRerankFn(createHttpReranker({
+            endpoint: input.rerankEndpoint,
+            model: input.rerankModel,
+            timeoutMs: input.rerankTimeoutMs ?? 1500,
+        }));
+    }
     const latestRoute = new Map();
     const extractChain = new Map();
     const turnCounts = new Map();
