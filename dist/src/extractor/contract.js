@@ -9,6 +9,30 @@ const NavigationTripleSchema = Type.Object({
     predicate: Type.String({ minLength: 1, description: "Short relation phrase." }),
     object: Type.String({ minLength: 1, description: "Concrete searchable object phrase." }),
 }, { additionalProperties: false });
+const ConceptEntitySchema = Type.Object({
+    name: Type.String({
+        minLength: 1,
+        maxLength: 24,
+        description: "Reusable noun phrase naming one concept; never a sentence, a status word, or a bare quantity.",
+    }),
+    type: Type.String({
+        enum: ["EVENT", "SKILL", "TASK"],
+        description: "Concept kind: EVENT happened, SKILL reusable capability, TASK goal or pending work.",
+    }),
+    description: Type.String({
+        minLength: 1,
+        description: "One sentence stating what this concept is, using only evidence from this turn.",
+    }),
+}, { additionalProperties: false });
+const ConceptRelationSchema = Type.Object({
+    from: Type.String({ minLength: 1, description: "Subject name; must equal one entities[].name value." }),
+    to: Type.String({ minLength: 1, description: "Object name; must equal one entities[].name value." }),
+    type: Type.String({
+        enum: ["RELATES", "SUPERSEDES", "USED_SKILL", "SOLVED_BY", "REQUIRES", "PATCHES", "CONFLICTS_WITH"],
+        description: "Declared relation kind between the two concepts.",
+    }),
+    instruction: Type.String({ minLength: 1, description: "Short natural-language statement of the relation." }),
+}, { additionalProperties: false });
 /**
  * Provider-facing extraction contract.
  *
@@ -27,11 +51,17 @@ export const GRAPH_EXTRACTION_SCHEMA = Type.Object({
     triples: Type.Array(NavigationTripleSchema, {
         description: "Required SPO relations derived only from summary; use an empty array when none are explicit.",
     }),
+    entities: Type.Optional(Type.Array(ConceptEntitySchema, {
+        description: "Optional durable concept list for this turn; omit or use [] when the turn yields no reusable concept.",
+    })),
+    relations: Type.Optional(Type.Array(ConceptRelationSchema, {
+        description: "Optional typed links between entries of entities; both endpoints must be declared concepts.",
+    })),
 }, { additionalProperties: false });
 export const GRAPH_EXTRACTION_TOOL_NAME = "submit_result";
 export const GRAPH_EXTRACTION_TOOL = Object.freeze({
     name: GRAPH_EXTRACTION_TOOL_NAME,
-    description: "Submit exactly the three required fields summary, outcome, and triples. Derive zero or more subject-predicate-object triples only from the summary; triples must be [] when no relation is explicit. Emit no text.",
+    description: "Submit exactly the three required fields summary, outcome, and triples. Derive zero or more subject-predicate-object triples only from the summary; triples must be [] when no relation is explicit. Optionally add entities and relations when the turn names reusable concepts. Emit no text.",
     parameters: GRAPH_EXTRACTION_SCHEMA,
 });
 /** Fail closed before normalization or persistence when the contract is incomplete. */

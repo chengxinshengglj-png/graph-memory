@@ -9,7 +9,7 @@ import { randomUUID } from "node:crypto";
 import { dshMemorySource, isDshMemorySource } from "./src/format/dsh-source.js";
 import { DshExtractionUnavailableError, resolveDshExtractionReasoning, } from "./src/engine/dsh-extraction-route.js";
 import { openDb } from "./src/store/db.js";
-import { allActiveNodes, getRecentTurnMemoriesBySession, getStats, getVectorStats, getNextUnextractedTurn, getUnextractedTurn, getExtractionStats, getPendingSessionIds, getExtractionCompletedTurn, getNodeSources, markMessagesExtracted, markExtractionTurnCompleted, quarantineMessages, recordExtractionFailure, requeueQuarantined, saveMessageOnce, upsertNode, upsertTurnMemory, replaceNavigationTriples, } from "./src/store/store.js";
+import { allActiveNodes, getRecentTurnMemoriesBySession, getStats, getVectorStats, getNextUnextractedTurn, getUnextractedTurn, getExtractionStats, getPendingSessionIds, getExtractionCompletedTurn, getNodeSources, markMessagesExtracted, markExtractionTurnCompleted, quarantineMessages, recordExtractionFailure, requeueQuarantined, saveMessageOnce, upsertNode, upsertTurnMemory, replaceNavigationTriples, applyConceptExtraction, } from "./src/store/store.js";
 import { Extractor } from "./src/extractor/extract.js";
 import { GRAPH_EXTRACTION_TOOL, GRAPH_EXTRACTION_TOOL_NAME, } from "./src/extractor/contract.js";
 import { Recaller } from "./src/recaller/recall.js";
@@ -281,6 +281,13 @@ export function apply(ctx, input = {}) {
             })),
         });
         replaceNavigationTriples(db, turnMemory, result.triples);
+        // The concept layer rides on the same extraction payload. Writing it here
+        // is what keeps the durable graph current: without this step the host only
+        // ever stored navigation, so every concept had to be recorded by hand.
+        const concept = applyConceptExtraction(db, sid, turnMemory.sources, result.entities ?? [], result.relations ?? []);
+        if (concept.nodes || concept.edges) {
+            ctx.logger.info(`[graph-memory] DSH stored ${concept.nodes} concept nodes and ${concept.edges} concept edges`);
+        }
         // The navigation graph becomes queryable only after its atomic SPO write.
         // This runs inside the existing background extraction worker, never in the
         // foreground turn, and makes the newest completed memory available to PPR.

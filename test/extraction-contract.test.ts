@@ -39,4 +39,20 @@ describe("graph extraction data contract", () => {
   it("rejects undeclared fields instead of silently rewriting them", () => {
     expect(() => assertGraphExtractionContract({ ...validPayload, extra: true })).toThrow("contract violation");
   });
+
+  it("accepts the optional concept blocks alongside the required fields", () => {
+    const payload = {
+      ...validPayload,
+      entities: [{ name: "抽取路由", type: "SKILL", description: "抽取请求使用的模型路由配置" }],
+      relations: [{ from: "抽取路由", to: "抽取路由", type: "RELATES", instruction: "自指示例" }],
+    };
+    expect(() => assertGraphExtractionContract(payload)).not.toThrow();
+  });
+
+  it("rejects an entity carrying an undeclared field", () => {
+    expect(() => assertGraphExtractionContract({
+      ...validPayload,
+      entities: [{ name: "抽取路由", type: "SKILL", description: "路由配置", weight: 1 }],
+    })).toThrow("contract violation");
+  });
 });

@@ -35,6 +35,7 @@ import {
   upsertNode,
   upsertTurnMemory,
   replaceNavigationTriples,
+  applyConceptExtraction,
 } from "./src/store/store.ts";
 import { Extractor } from "./src/extractor/extract.ts";
 import {
@@ -428,6 +429,21 @@ export function apply(ctx: DshContext, input: Config = {}): void {
       })),
     });
     replaceNavigationTriples(db, turnMemory, result.triples);
+    // The concept layer rides on the same extraction payload. Writing it here
+    // is what keeps the durable graph current: without this step the host only
+    // ever stored navigation, so every concept had to be recorded by hand.
+    const concept = applyConceptExtraction(
+      db,
+      sid,
+      turnMemory.sources,
+      result.entities ?? [],
+      result.relations ?? [],
+    );
+    if (concept.nodes || concept.edges) {
+      ctx.logger.info(
+        `[graph-memory] DSH stored ${concept.nodes} concept nodes and ${concept.edges} concept edges`,
+      );
+    }
     // The navigation graph becomes queryable only after its atomic SPO write.
     // This runs inside the existing background extraction worker, never in the
     // foreground turn, and makes the newest completed memory available to PPR.

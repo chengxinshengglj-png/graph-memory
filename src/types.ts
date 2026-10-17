@@ -115,6 +115,22 @@ export interface ExtractionResult {
     predicate: string;
     object: string;
   }>;
+  /**
+   * Durable concepts named by this turn. Optional: a host may omit them, and a
+   * turn whose summary yields no reusable concept legitimately has none.
+   */
+  entities?: Array<{
+    name: string;
+    type: "EVENT" | "SKILL" | "TASK";
+    description: string;
+  }>;
+  /** Typed links between `entities`; both endpoints must name a declared concept. */
+  relations?: Array<{
+    from: string;
+    to: string;
+    type: "RELATES" | "SUPERSEDES" | "USED_SKILL" | "SOLVED_BY" | "REQUIRES" | "PATCHES" | "CONFLICTS_WITH";
+    instruction: string;
+  }>;
 }
 
 // ─── 召回结果 ─────────────────────────────────────────────────

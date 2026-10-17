@@ -210,6 +210,69 @@ export function upsertEdge(db, e) {
     VALUES (?,?,?,?,?,?,?,?)`)
         .run(uid("e"), e.fromId, e.toId, e.type, e.instruction, e.condition ?? null, e.sessionId, Date.now());
 }
+const NODE_TYPES = new Set(["TASK", "SKILL", "EVENT"]);
+const EDGE_TYPES = new Set([
+    "RELATES", "SUPERSEDES", "USED_SKILL", "SOLVED_BY", "REQUIRES", "PATCHES", "CONFLICTS_WITH",
+]);
+/**
+ * Persist the concept layer a completed turn named, atomically with its provenance.
+ *
+ * The concept graph is the durable half of memory: turn capsules answer "what
+ * happened", concepts answer "what is this thing". Extraction already emits
+ * both; this is the only place that turns the concept half into rows.
+ *
+ * Idempotence and provenance rules:
+ * - a concept that already exists is CONFIRMED (content kept, source added) so
+ *   a recurring mention cannot silently rewrite an established description nor
+ *   detach the evidence that supported it;
+ * - a relation is keyed by (from, to, type), so re-observing it updates the
+ *   instruction instead of duplicating the edge;
+ * - endpoints that are not declared concepts in the same payload are dropped:
+ *   a relation without both nodes is not evidence of anything.
+ */
+export function applyConceptExtraction(db, sessionId, sources, entities = [], relations = []) {
+    if (!entities.length)
+        return { nodes: 0, edges: 0 };
+    const idByName = new Map();
+    let nodes = 0;
+    for (const entity of entities) {
+        // TypeBox validates shape and length but not `enum` at runtime, so a value
+        // outside the declared kind set would otherwise reach the CHECK constraint.
+        if (!NODE_TYPES.has(entity.type))
+            continue;
+        const existing = findByName(db, entity.name);
+        const { node, isNew } = upsertNode(db, {
+            name: entity.name,
+            type: entity.type,
+            description: entity.description,
+            content: entity.description,
+            // Confirmation preserves the established claim; creation publishes it.
+            operation: existing ? "confirm" : "create",
+        }, sessionId, sources);
+        if (isNew)
+            nodes++;
+        idByName.set(entity.name, node.id);
+    }
+    let edges = 0;
+    const resolve = (name) => idByName.get(name) ?? findByName(db, name)?.id ?? null;
+    for (const relation of relations) {
+        if (!EDGE_TYPES.has(relation.type))
+            continue;
+        const fromId = resolve(relation.from);
+        const toId = resolve(relation.to);
+        if (!fromId || !toId || fromId === toId)
+            continue;
+        upsertEdge(db, {
+            fromId,
+            toId,
+            type: relation.type,
+            instruction: relation.instruction,
+            sessionId,
+        });
+        edges++;
+    }
+    return { nodes, edges };
+}
 export function edgesFrom(db, id) {
     return db.prepare("SELECT * FROM gm_edges WHERE from_id=?").all(id).map(toEdge);
 }

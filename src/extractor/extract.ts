@@ -43,9 +43,11 @@ const EXTRACT_SYS = `【任务】
 1. summary 用一句简短、自包含的话写清本轮对象、结论和最终回答明确报告的完成情况；不复述过程，不添加输入未表达的信息。
 2. outcome 按最终回答选择 completed、partial、failed、informational、unknown 之一。
 3. triples 只从 summary 拆分。subject 和 object 使用具体可检索短语，predicate 使用简短自然语言；没有明确关系时使用空数组，不补充、不猜测。
+4. entities 可选，用于记录本轮出现的、以后还会被问到的概念。每个概念给三样：name 是 2~16 字的名词短语（禁止整句，禁止“全部正常 / 已完成 / 72 个”这类状态与数量）；type 取 EVENT（发生过的事）、SKILL（可复用的工具、技能、脚本、服务、配置）、TASK（目标、待办、缺口）；description 用一句话说明它是什么，只用本轮信息。本轮没有可复用概念时省略该字段。
+5. relations 可选，只在确有明确关系时输出：from 与 to 必须是 entities 里出现过的 name，type 取 RELATES、SUPERSEDES、USED_SKILL、SOLVED_BY、REQUIRES、PATCHES、CONFLICTS_WITH 之一，instruction 用一句中文说明关系。没有关系时省略该字段。
 
 【输出合同】
-只调用 submit_result 一次。参数对象必须且只能包含 summary、outcome、triples 三个顶层字段，三个字段都不能省略。不要输出解释或正文。
+只调用 submit_result 一次。参数对象必须包含 summary、outcome、triples 三个顶层字段，三个字段都不能省略；可选包含 entities 与 relations。不要输出解释或正文。
 
 示例一：
 输入：用户要求把周会改到周四；最终回答确认日程已更新。
@@ -59,7 +61,11 @@ const EXTRACT_SYS = `【任务】
 输入只确认稍后继续讨论，没有新结论。
 输出：{"summary":"本轮确认稍后继续讨论，未产生新结论。","outcome":"informational","triples":[]}
 
-调用前自检：参数是否恰好包含三个顶层字段；outcome 是否属于枚举；没有关系时 triples 是否仍明确写为 []。`;
+示例四（带概念）：
+输入：助手把抽取路由钉到本地 27B，避免打到线上账号。
+输出：{"summary":"抽取路由已改为本地 27B，不再使用线上账号。","outcome":"completed","triples":[{"subject":"抽取路由","predicate":"改为","object":"本地 27B"}],"entities":[{"name":"抽取路由","type":"SKILL","description":"抽取请求使用的模型路由配置"},{"name":"本地 27B","type":"SKILL","description":"本机 llama-swap 上的主模型"},{"name":"线上账号","type":"EVENT","description":"此前误用线上 API 的问题"}],"relations":[{"from":"抽取路由","to":"本地 27B","type":"REQUIRES","instruction":"路由改为依赖本地模型"},{"from":"抽取路由","to":"线上账号","type":"SOLVED_BY","instruction":"改路由后不再走线上账号"}]}
+
+调用前自检：是否包含 summary、outcome、triples 三个必需字段；outcome 是否属于枚举；没有关系时 triples 是否仍明确写为 []；若输出 entities 与 relations，relation 两端是否都能在 entities 的 name 中找到，且 type 是否在枚举内。`;
 
 // ─── 提取 User Prompt ───────────────────────────────────────────
 
@@ -111,6 +117,11 @@ export class Extractor {
       return {
         turn: { summary: p.summary, outcome: p.outcome },
         triples: p.triples.map(triple => ({ ...triple })),
+        // Optional blocks are copied verbatim and default to empty. The contract
+        // decides whether they are well formed; a host that does not persist
+        // concepts simply ignores them, so the field stays additive.
+        entities: (p.entities ?? []).map(entity => ({ ...entity })),
+        relations: (p.relations ?? []).map(relation => ({ ...relation })),
       };
     } catch (err) {
       // Extraction output can contain private conversation facts. Report the
